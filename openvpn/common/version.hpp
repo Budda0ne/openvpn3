@@ -24,5 +24,9 @@
 #pragma once
 
 #ifndef OPENVPN_VERSION
+<<<<<<< HEAD
 #define OPENVPN_VERSION "3.7_git:master"
+=======
+#define OPENVPN_VERSION "3.6.2"
+>>>>>>> parent of d06e216e (Finalizing OpenVPN 3 Core library release v3.6.3)
 #endif

@@ -506,7 +506,7 @@ namespace openvpn {
 
 	void streaming_start()
 	{
-	  cancel_general_timeout();
+	  cancel_general_timeout(); // cancel general timeout once websocket streaming begins
 	  content_out_hold = false;
 	  if (is_deferred())
 	    http_content_out_needed();
@@ -854,11 +854,10 @@ namespace openvpn {
 	  IP::Addr addr = sf.remote_ip();
 	  if (!addr.defined())
 	    addr = IP::Addr(host.host_transport(), "AltRouting");
-	  results_type results =
-	    results_type::create(openvpn_io::ip::tcp::endpoint(addr.to_asio(),
-											      port),
-								host.host,
-								"");
+	  results_type results = results_type::create(openvpn_io::ip::tcp::endpoint(addr.to_asio(),
+										    port),
+						      host.host,
+						      "");
 
 	  if (config->debug_level >= 2)
 	    OPENVPN_LOG("ALT_ROUTING HTTP CONNECT to " << s->remote_endpoint_str() << " res=" << asio_resolver_results_to_string(results));

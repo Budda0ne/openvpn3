@@ -41,7 +41,7 @@
 #include <openvpn/crypto/cryptodcsel.hpp>
 #include <openvpn/ssl/mssparms.hpp>
 #include <openvpn/tun/tunmtu.hpp>
-#include <openvpn/tun/ipv6_setting.hpp>
+#include <openvpn/tun/tristate_setting.hpp>
 #include <openvpn/netconf/hwaddr.hpp>
 
 #include <openvpn/transport/socket_protect.hpp>
@@ -127,7 +127,7 @@ namespace openvpn {
       std::string platform_version;
       Protocol proto_override;
       IP::Addr::Version proto_version_override = IP::Addr::Version::UNSPEC;
-      IPv6Setting ipv6;
+      TriStateSetting allowUnusedAddrFamilies;
       int conn_timeout = 0;
       SessionStats::Ptr cli_stats;
       ClientEvent::Queue::Ptr cli_events;
@@ -139,6 +139,7 @@ namespace openvpn {
       bool info = false;
       bool tun_persist = false;
       bool wintun = false;
+      bool allow_local_dns_resolvers = false;
       bool google_dns_fallback = false;
       bool synchronous_dns_lookup = false;
       std::string private_key_password;
@@ -148,10 +149,13 @@ namespace openvpn {
       bool autologin_sessions = false;
       bool retry_on_auth_failed = false;
       bool allow_local_lan_access = false;
+	  bool preferred_security = true;
       std::string tls_version_min_override;
       std::string tls_cert_profile_override;
       std::string tls_cipher_list;
       std::string tls_ciphersuite_list;
+	  bool enable_legacy_algorithms = false;
+      bool enable_nonpreferred_dcalgs;
       PeerInfo::Set::Ptr extra_peer_info;
 #ifdef OPENVPN_GREMLIN
       Gremlin::Config::Ptr gremlin_config;
@@ -207,11 +211,13 @@ namespace openvpn {
 	,extern_transport_factory(config.extern_transport_factory)
 #endif
     {
-      CryptoAlgs::allow_default_dc_algs();
-
 #if (defined(ENABLE_KOVPN) || defined(ENABLE_OVPNDCO) || defined(ENABLE_OVPNDCOWIN)) && !defined(OPENVPN_FORCE_TUN_NULL) && !defined(OPENVPN_EXTERNAL_TUN_FACTORY)
       if (config.dco)
-	dco = DCOTransport::new_controller();
+#if defined(USE_TUN_BUILDER)
+	dco = DCOTransport::new_controller(config.builder);
+#else
+	dco = DCOTransport::new_controller(nullptr);
+#endif
 #endif
 
       // parse general client options
@@ -243,7 +249,12 @@ namespace openvpn {
       // OpenVPN Protocol context (including SSL)
       cp_main = proto_config(opt, config, pcc, false);
       cp_relay = proto_config(opt, config, pcc, true); // may be null
-      layer = cp_main->layer;
+
+      CryptoAlgs::allow_default_dc_algs<SSLLib::CryptoAPI>(cp_main->ssl_factory->libctx(),
+							   !config.enable_nonpreferred_dcalgs,
+							   config.enable_legacy_algorithms);
+
+	  layer = cp_main->layer;
 
 #ifdef PRIVATE_TUNNEL_PROXY
       if (config.alt_proxy && !dco)
@@ -327,9 +338,6 @@ namespace openvpn {
       if (dco)
 	{
 	  DCO::TunConfig tunconf;
-#if defined(USE_TUN_BUILDER)
-	  dco->builder = config.builder;
-#endif
 #if defined(OPENVPN_COMMAND_AGENT) && defined(OPENVPN_PLATFORM_WIN)
 	  tunconf.setup_factory = WinCommandAgent::new_agent(opt);
 #endif
@@ -519,6 +527,9 @@ namespace openvpn {
 	push_base->multi.extend(opt, "redirect-private");
 	push_base->multi.extend(opt, "dhcp-option");
 
+	// base options which need to be merged, not just aggregated
+	push_base->merge.extend(opt, "dns");
+
 	// base options where only a single instance of each option makes sense
 	push_base->singleton.extend(opt, "redirect-dns");
 	push_base->singleton.extend(opt, "inactive");
@@ -526,9 +537,18 @@ namespace openvpn {
 
 	// IPv6
 	{
-	  const unsigned int n = push_base->singleton.extend(opt, "block-ipv6");
-	  if (!n && config.ipv6() == IPv6Setting::No)
-	    push_base->singleton.emplace_back("block-ipv6");
+	  const unsigned int n6 = push_base->singleton.extend(opt, "block-ipv6");
+	  const unsigned int n4 = push_base->singleton.extend(opt, "block-ipv4");
+
+	  if (!n6 && config.allowUnusedAddrFamilies() == TriStateSetting::No)
+	    {
+	      push_base->singleton.emplace_back("block-ipv6");
+	    }
+	  if (!n4 && config.allowUnusedAddrFamilies() == TriStateSetting::No)
+	    {
+	      push_base->singleton.emplace_back("block-ipv4");
+	    }
+
 	}
       }
 
@@ -539,12 +559,6 @@ namespace openvpn {
     static PeerInfo::Set::Ptr build_peer_info(const Config& config, const ParseClientConfig& pcc, const bool autologin_sessions)
     {
       PeerInfo::Set::Ptr pi(new PeerInfo::Set);
-
-      // IPv6
-      if (config.ipv6() == IPv6Setting::No)
-	pi->emplace_back("IV_IPv6", "0");
-      else if (config.ipv6() == IPv6Setting::Yes)
-	pi->emplace_back("IV_IPv6", "1");
 
       // autologin sessions
       if (autologin_sessions)
@@ -737,6 +751,8 @@ namespace openvpn {
       cc->set_debug_level(config.ssl_debug_level);
       cc->set_rng(rng);
       cc->set_local_cert_enabled(pcc.clientCertEnabled() && !config.disable_client_cert);
+      /* load depends on private key password and legacy algorithms */
+      cc->enable_legacy_algorithms(config.enable_legacy_algorithms);
       cc->set_private_key_password(config.private_key_password);
       cc->load(opt, lflags);
       cc->set_tls_version_min_override(config.tls_version_min_override);
@@ -748,14 +764,14 @@ namespace openvpn {
 
       // client ProtoContext config
       Client::ProtoConfig::Ptr cp(new Client::ProtoConfig());
-      cp->relay_mode = relay_mode;
-      cp->dc.set_factory(new CryptoDCSelect<SSLLib::CryptoAPI>(frame, cli_stats, prng));
+	  cp->ssl_factory = cc->new_factory();
+	  cp->relay_mode = relay_mode;
+      cp->dc.set_factory(new CryptoDCSelect<SSLLib::CryptoAPI>(cp->ssl_factory->libctx(), frame, cli_stats, prng));
       cp->dc_deferred = true; // defer data channel setup until after options pull
       cp->tls_auth_factory.reset(new CryptoOvpnHMACFactory<SSLLib::CryptoAPI>());
       cp->tls_crypt_factory.reset(new CryptoTLSCryptFactory<SSLLib::CryptoAPI>());
       cp->tls_crypt_metadata_factory.reset(new CryptoTLSCryptMetadataFactory());
       cp->tlsprf_factory.reset(new CryptoTLSPRFFactory<SSLLib::CryptoAPI>());
-      cp->ssl_factory = cc->new_factory();
       cp->load(opt, *proto_context_options, config.default_key_direction, false);
       cp->set_xmit_creds(!autologin || pcc.hasEmbeddedPassword() || autologin_sessions);
       cp->extra_peer_info = build_peer_info(config, pcc, autologin_sessions);

@@ -21,7 +21,7 @@
 
 // OpenVPN 3 test client
 
-#include <stdlib.h> // for atoi
+#include <stdlib.h>
 
 #include <string>
 #include <iostream>
@@ -79,6 +79,8 @@
 
 #if defined(USE_MBEDTLS)
 #include <openvpn/mbedtls/util/pkcs1.hpp>
+#elif defined(USE_OPENSSL)
+#include <openssl/evp.h>
 #endif
 
 #if defined(OPENVPN_PLATFORM_WIN)
@@ -231,6 +233,8 @@ public:
   std::string epki_cert;
 #if defined(USE_MBEDTLS)
   MbedTLSPKI::PKContext epki_ctx; // external PKI context
+#elif defined(USE_OPENSSL)
+  openvpn::OpenSSLPKI::PKey epki_pkey;
 #endif
 
   void set_clock_tick_action(const ClockTickAction action)
@@ -292,32 +296,73 @@ private:
       {
 	std::cout << "PROXY_NEED_CREDS " << ev.info << std::endl;
       }
-    else if (ev.name == "INFO" && (string::starts_with(ev.info, "OPEN_URL:http://")
-				|| string::starts_with(ev.info, "OPEN_URL:https://")))
+    else if (ev.name == "INFO")
       {
-	// launch URL
-	const std::string url_str = ev.info.substr(9);
+     	if (string::starts_with(ev.info, "OPEN_URL:"))
+	  {
+	    open_url(ev.info.substr(9), "");
+	  }
+    	else if (string::starts_with(ev.info, "WEB_AUTH:"))
+	  {
+	    auto extra = ev.info.substr(9);
+	    size_t flagsend = extra.find(':');
+	    if (flagsend != std::string::npos)
+	      {
 
-	if (!write_url_fn.empty())
-	  write_string(write_url_fn, url_str + '\n');
-
-#ifdef OPENVPN_PLATFORM_MAC
-	std::thread thr([url_str]() {
-	    CFURLRef url = CFURLCreateWithBytes(
-	        NULL,                        // allocator
-		(UInt8*)url_str.c_str(),     // URLBytes
-		url_str.length(),            // length
-		kCFStringEncodingUTF8,       // encoding
-		NULL                         // baseURL
-	    );
-	    LSOpenCFURLRef(url, 0);
-	    CFRelease(url);
-	  });
-	thr.detach();
-#else
-	std::cout << "No implementation to launch " << url_str << std::endl;
-#endif
+		auto flags = extra.substr(0, flagsend);
+		auto url = extra.substr(flagsend + 1);
+		open_url(url, flags);
+	      }
+	  }
+	else if (string::starts_with(ev.info, "CR_TEXT:"))
+          {
+            std::string cr_response;
+            std::cout << "\n\n" << ev.info.substr(8) << ": ";
+            std::getline(std::cin, cr_response);
+            post_cc_msg("CR_RESPONSE," + base64->encode(cr_response));
+          }
       }
+  }
+
+  void open_url(std::string url_str, std::string flags)
+  {
+      if (string::starts_with(url_str, "http://")
+	|| string::starts_with(url_str, "https://"))
+	{
+	  if (!write_url_fn.empty())
+	    {
+	      write_string(write_url_fn, url_str + '\n');
+	      return;
+	    }
+#ifdef OPENVPN_PLATFORM_MAC
+	  std::thread thr([url_str]()
+			  {
+			    CFURLRef url = CFURLCreateWithBytes(
+			      NULL,                        // allocator
+			      (UInt8*) url_str.c_str(),     // URLBytes
+			      url_str.length(),            // length
+			      kCFStringEncodingUTF8,       // encoding
+			      NULL                         // baseURL
+			    );
+			    LSOpenCFURLRef(url, 0);
+			    CFRelease(url);
+			  });
+	  thr.detach();
+#elif defined(OPENVPN_PLATFORM_TYPE_UNIX)
+	  Argv argv;
+	  if (::getuid() == 0 && ::getenv("SUDO_USER"))
+	    {
+	      argv.emplace_back("/usr/sbin/runuser");
+	      argv.emplace_back("-u");
+	      argv.emplace_back(::getenv("SUDO_USER"));
+	    }
+	  argv.emplace_back("/usr/bin/xdg-open");
+	  argv.emplace_back(url_str);
+	  system_cmd(argv);
+#else
+	  std::cout << "No implementation to launch " << url_str << std::endl;
+#endif
+	}
   }
 
   virtual void log(const ClientAPI::LogInfo& log) override
@@ -417,6 +462,64 @@ private:
 	  }
       }
     else
+#elif defined(USE_OPENSSL)
+      if (epki_pkey.defined())
+      {
+        EVP_PKEY_CTX* pkey_ctx = nullptr;
+        try {
+          BufferAllocated signdata(256, BufferAllocated::GROW);
+          base64->decode(signdata, signreq.data);
+
+          EVP_PKEY* pkey = epki_pkey.obj();
+
+
+          if(!(pkey_ctx = EVP_PKEY_CTX_new(pkey, NULL)))
+            throw Exception("epki_sign failed, error creating PKEY ctx");
+
+          if ((EVP_PKEY_sign_init(pkey_ctx) < 0))
+          {
+            throw Exception("epki_sign failed, error in EVP_PKEY_sign_init: " + openssl_error());
+          }
+
+          if (signreq.algorithm == "RSA_PKCS1_PADDING")
+          {
+            EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_PKCS1_PADDING);
+          }
+          else if (signreq.algorithm == "RSA_NO_PADDING")
+          {
+            EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, RSA_NO_PADDING);
+          }
+
+          /* determine the output length */
+          std::size_t outlen;
+
+          if ((EVP_PKEY_sign(pkey_ctx, nullptr, &outlen, signdata.c_data(), signdata.size())) < 0)
+          {
+            throw Exception("epki_sign failed, error signing data: " + openssl_error());
+          }
+
+          BufferAllocated sig(outlen, BufferAllocated::ARRAY);
+
+
+          if ((EVP_PKEY_sign(pkey_ctx, sig.data(), &outlen, signdata.c_data(), signdata.size())) < 0)
+          {
+            throw Exception("epki_sign failed, error signing data: " + openssl_error());
+          }
+
+          sig.set_size(outlen);
+
+          // encode base64 signature
+          signreq.sig = base64->encode(sig);
+          OPENVPN_LOG("SIGNATURE[" << outlen << "]: " << signreq.sig);
+        }
+        catch (const std::exception& e)
+        {
+          signreq.error = true;
+          signreq.errorText = std::string("external_pki_sign_request: ") + e.what();
+        }
+        EVP_PKEY_CTX_free(pkey_ctx);
+      }
+      else
 #endif
       {
 	signreq.error = true;
@@ -723,6 +826,7 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
     { "google-dns",     no_argument,        nullptr,      'g' },
     { "persist-tun",    no_argument,        nullptr,      'j' },
     { "wintun",         no_argument,        nullptr,      'w' },
+    { "allow-local-dns-resolvers", no_argument, nullptr,  'l' },
     { "def-keydir",     required_argument,  nullptr,      'k' },
     { "merge",          no_argument,        nullptr,      'm' },
     { "version",        no_argument,        nullptr,      'v' },
@@ -735,6 +839,8 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
     { "epki-cert",      required_argument,  nullptr,       2  },
     { "epki-ca",        required_argument,  nullptr,       3  },
     { "epki-key",       required_argument,  nullptr,       4  },
+	{ "legacy-algorithms", no_argument,      nullptr,      'L' },
+    { "non-preferred-algorithms", no_argument, nullptr, 'Q' },
 #ifdef OPENVPN_REMOTE_OVERRIDE
     { "remote-override",required_argument,  nullptr,       5  },
 #endif
@@ -754,7 +860,7 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	std::string response;
 	std::string dynamicChallengeCookie;
 	std::string proto;
-	std::string ipv6;
+	std::string allowUnusedAddrFamilies;
 	std::string server;
 	std::string port;
 	int timeout = 0;
@@ -775,13 +881,15 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	bool disableClientCert = false;
 	bool proxyAllowCleartextAuth = false;
 	int defaultKeyDirection = -1;
-	bool forceAesCbcCiphersuites = false;
 	int sslDebugLevel = 0;
 	bool googleDnsFallback = false;
 	bool autologinSessions = false;
 	bool retryOnAuthFailed = false;
 	bool tunPersist = false;
 	bool wintun = false;
+	bool allowLocalDnsResolvers = false;
+	bool enableLegacyAlgorithms = false;
+	bool enableNonPreferredDCO = false;
 	bool merge = false;
 	bool version = false;
 	bool altProxy = false;
@@ -796,7 +904,8 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 
 	int ch;
 	optind = 1;
-	while ((ch = getopt_long(argc, argv, "BAdeTCxfgjwmvaYu:p:r:D:P:6:s:S:t:c:z:M:h:q:U:W:I:G:k:X:R:Z:", longopts, nullptr)) != -1)
+
+	while ((ch = getopt_long(argc, argv, "6:ABCD:G:I:LM:P:QR:S:TU:W:X:YZ:ac:degh:jk:lmp:q:r:s:t:u:vwxz:", longopts, nullptr)) != -1)
 	  {
 	    switch (ch)
 	      {
@@ -842,7 +951,7 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 		proto = optarg;
 		break;
 	      case '6':
-		ipv6 = optarg;
+		allowUnusedAddrFamilies = optarg;
 		break;
 	      case 's':
 		server = optarg;
@@ -874,6 +983,9 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	      case 'q':
 		proxyPort = optarg;
 		break;
+	      case 'Q':
+		enableNonPreferredDCO = true;
+		break;
 	      case 'U':
 		proxyUsername = optarg;
 		break;
@@ -889,9 +1001,6 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	      case 'd':
 		dco = false;
 		break;
-	      case 'f':
-		forceAesCbcCiphersuites = true;
-		break;
 	      case 'g':
 		googleDnsFallback = true;
 		break;
@@ -906,6 +1015,9 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 		break;
 	      case 'w':
 		wintun = true;
+		break;
+	      case 'l':
+		allowLocalDnsResolvers = true;
 		break;
 	      case 'm':
 		merge = true;
@@ -934,6 +1046,9 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 		break;
 	      case 'G':
 		gremlin = optarg;
+		break;
+	      case 'L':
+		enableLegacyAlgorithms = true;
 		break;
 	      case 'Z':
 		write_url_fn = optarg;
@@ -990,7 +1105,7 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	      config.protoOverride = proto;
 	      config.connTimeout = timeout;
 	      config.compressionMode = compress;
-	      config.ipv6 = ipv6;
+	      config.allowUnusedAddrFamilies = allowUnusedAddrFamilies;
 	      config.privateKeyPassword = privateKeyPassword;
 	      config.tlsVersionMinOverride = tlsVersionMinOverride;
 	      config.tlsCertProfileOverride = tlsCertProfileOverride;
@@ -1003,7 +1118,6 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	      config.altProxy = altProxy;
 	      config.dco = dco;
 	      config.defaultKeyDirection = defaultKeyDirection;
-	      config.forceAesCbcCiphersuites = forceAesCbcCiphersuites;
 	      config.sslDebugLevel = sslDebugLevel;
 	      config.googleDnsFallback = googleDnsFallback;
 	      config.autologinSessions = autologinSessions;
@@ -1012,6 +1126,9 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 	      config.gremlinConfig = gremlin;
 	      config.info = true;
 	      config.wintun = wintun;
+	      config.allowLocalDnsResolvers = allowLocalDnsResolvers;
+		  config.enableLegacyAlgorithms = enableLegacyAlgorithms;
+	      config.enableNonPreferredDCAlgorithms = enableNonPreferredDCO;
 	      config.ssoMethods =ssoMethods;
 #if defined(OPENVPN_OVPNCLI_SINGLE_THREAD)
 	      config.clockTickMS = 250;
@@ -1117,11 +1234,15 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 		      client.epki_cert = read_text_utf8(epki_cert_fn);
 		      if (!epki_ca_fn.empty())
 			client.epki_ca = read_text_utf8(epki_ca_fn);
-#if defined(USE_MBEDTLS)
+#if defined(USE_MBEDTLS) || defined(USE_OPENSSL)
 		      if (!epki_key_fn.empty())
 			{
 			  const std::string epki_key_txt = read_text_utf8(epki_key_fn);
+#if defined(USE_MBEDTLS)
 			  client.epki_ctx.parse(epki_key_txt, "EPKI", privateKeyPassword);
+#else
+			  client.epki_pkey.parse_pem(epki_key_txt, "epki private key", nullptr);
+#endif
 			}
 		      else
 			OPENVPN_THROW_EXCEPTION("--epki-key must be specified");
@@ -1179,13 +1300,15 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
 #ifdef OPENVPN_REMOTE_OVERRIDE
       std::cout << "--remote-override     : command to run to generate next remote (returning host,ip,port,proto)" << std::endl;
 #endif
-      std::cout << "--ipv6, -6            : IPv6 (yes|no|default)" << std::endl;
+      std::cout << "--allowAF, -6         : Allow unused address families (yes|no|default)" << std::endl;
       std::cout << "--timeout, -t         : timeout" << std::endl;
       std::cout << "--compress, -c        : compression mode (yes|no|asym)" << std::endl;
       std::cout << "--pk-password, -z     : private key password" << std::endl;
       std::cout << "--tvm-override, -M    : tls-version-min override (disabled, default, tls_1_x)" << std::endl;
+      std::cout << "--legacy-algorithms, -L: Enable legacy algorithm (OpenSSL legacy provider)" << std::endl;
+      std::cout << "--non-preferred-algorithms, -Q: Enables non preferred data channel algorithms" << std::endl;
       std::cout << "--tcprof-override, -X : tls-cert-profile override (" <<
-#ifdef OPENVPN_USE_TLS_MD5
+#ifdef OPENVPN_ALLOW_INSECURE_CERTPROFILE
           "insecure, " <<
 #endif
           "legacy, preferred, etc.)" << std::endl;
@@ -1201,7 +1324,6 @@ int openvpn_client(int argc, char *argv[], const std::string* profile_content)
       std::cout << "--cache-password, -C  : cache password" << std::endl;
       std::cout << "--no-cert, -x         : disable client certificate" << std::endl;
       std::cout << "--def-keydir, -k      : default key direction ('bi', '0', or '1')" << std::endl;
-      std::cout << "--force-aes-cbc, -f   : force AES-CBC ciphersuites" << std::endl;
       std::cout << "--ssl-debug           : SSL debug level" << std::endl;
       std::cout << "--google-dns, -g      : enable Google DNS fallback" << std::endl;
       std::cout << "--auto-sess, -a       : request autologin session" << std::endl;

@@ -434,10 +434,11 @@ namespace openvpn {
 	std::string port_override;
 	Protocol proto_override;
 	IP::Addr::Version proto_version_override;
-	IPv6Setting ipv6;
+	TriStateSetting allowUnusedAddrFamilies;
 	int conn_timeout = 0;
 	bool tun_persist = false;
 	bool wintun = false;
+	bool allow_local_dns_resolvers = false;
 	bool google_dns_fallback = false;
 	bool synchronous_dns_lookup = false;
 	bool autologin_sessions = false;
@@ -451,6 +452,8 @@ namespace openvpn {
 	std::string tls_cert_profile_override;
 	std::string tls_cipher_list;
 	std::string tls_ciphersuite_list;
+	bool enable_legacy_algorithms = false;
+	bool enable_nonpreferred_dcalgs = false;
 	std::string gui_version;
 	std::string sso_methods;
 	bool allow_local_lan_access = false;
@@ -627,8 +630,8 @@ namespace openvpn {
 	  Protocol::parse(config.protoOverride, Protocol::NO_SUFFIX);
 
 	// validate IPv6 setting
-	if (!config.ipv6.empty())
-	  IPv6Setting::parse(config.ipv6);
+	if (!config.allowUnusedAddrFamilies.empty())
+	  TriStateSetting::parse(config.allowUnusedAddrFamilies);
 
 	// parse config
 	OptionList::KeyValueList kvl;
@@ -683,6 +686,7 @@ namespace openvpn {
 	state->conn_timeout = config.connTimeout;
 	state->tun_persist = config.tunPersist;
 	state->wintun = config.wintun;
+	state->allow_local_dns_resolvers = config.allowLocalDnsResolvers;
 	state->google_dns_fallback = config.googleDnsFallback;
 	state->synchronous_dns_lookup = config.synchronousDnsLookup;
 	state->autologin_sessions = config.autologinSessions;
@@ -694,8 +698,8 @@ namespace openvpn {
 	  state->proto_version_override = IP::Addr::Version::V4;
 	else if (config.protoVersionOverride == 6)
 	  state->proto_version_override = IP::Addr::Version::V6;
-	if (!config.ipv6.empty())
-	  state->ipv6 = IPv6Setting::parse(config.ipv6);
+	if (!config.allowUnusedAddrFamilies.empty())
+	  state->allowUnusedAddrFamilies = TriStateSetting::parse(config.allowUnusedAddrFamilies);
 	if (!config.compressionMode.empty())
 	  state->proto_context_options->parse_compression_mode(config.compressionMode);
 	if (eval.externalPki)
@@ -707,6 +711,8 @@ namespace openvpn {
 	state->tls_cert_profile_override = config.tlsCertProfileOverride;
 	state->tls_cipher_list = config.tlsCipherList;
 	state->tls_ciphersuite_list = config.tlsCiphersuitesList;
+	state->enable_legacy_algorithms = config.enableLegacyAlgorithms;
+	state->enable_nonpreferred_dcalgs = config.enableNonPreferredDCAlgorithms;
 	state->allow_local_lan_access = config.allowLocalLanAccess;
 	state->gui_version = config.guiVersion;
 	state->sso_methods = config.ssoMethods;
@@ -968,10 +974,11 @@ namespace openvpn {
       cc.port_override = state->port_override;
       cc.proto_override = state->proto_override;
       cc.proto_version_override = state->proto_version_override;
-      cc.ipv6 = state->ipv6;
+      cc.allowUnusedAddrFamilies = state->allowUnusedAddrFamilies;
       cc.conn_timeout = state->conn_timeout;
       cc.tun_persist = state->tun_persist;
       cc.wintun = state->wintun;
+      cc.allow_local_dns_resolvers = state->allow_local_dns_resolvers;
       cc.google_dns_fallback = state->google_dns_fallback;
       cc.synchronous_dns_lookup = state->synchronous_dns_lookup;
       cc.autologin_sessions = state->autologin_sessions;
@@ -993,6 +1000,8 @@ namespace openvpn {
       cc.tls_cert_profile_override = state->tls_cert_profile_override;
       cc.tls_cipher_list = state->tls_cipher_list;
       cc.tls_ciphersuite_list = state->tls_ciphersuite_list;
+	  cc.enable_legacy_algorithms = state->enable_legacy_algorithms;
+      cc.enable_nonpreferred_dcalgs = state->enable_nonpreferred_dcalgs;
       cc.gui_version = state->gui_version;
       cc.sso_methods = state->sso_methods;
       cc.hw_addr_override = state->hw_addr_override;

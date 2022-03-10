@@ -177,7 +177,8 @@ namespace openvpn {
 
       // Set to a comma seperated list of supported SSO mechanisms that may
       // be signalled via INFO_PRE to the client.
-      // "openurl" is to continue authentication by opening an url in a browser
+      // "openurl"   deprecated version of webauth
+      // "webauth" to continue authentication by opening an url in a browser
       // "crtext" gives a challenge response in text format that needs to
       // responded via control channel. (
       // Passed to the server as IV_SSO
@@ -205,11 +206,11 @@ namespace openvpn {
       // Should be 4 for IPv4 or 6 for IPv6.
       int protoVersionOverride = 0;
 
-      // IPv6 preference
-      //  no      -- disable IPv6, so tunnel will be IPv4-only
-      //  yes     -- request combined IPv4/IPv6 tunnel
-      //  default (or empty string) -- leave decision to server
-      std::string ipv6;
+      // allowUnusedAddrFamilies preference
+      //  no      -- disable IPv6/IPv4, so tunnel will be IPv4 or IPv6 only if not dualstack
+      //  yes     -- Allow continuing using native IPv4/IPv6 connectivity for single IP family tunnel
+      //  default (or empty string) -- leave decision to server/config
+      std::string allowUnusedAddrFamilies;
 
       // Connection timeout in seconds, or 0 to retry indefinitely
       int connTimeout = 0;
@@ -255,13 +256,6 @@ namespace openvpn {
       // defined in profile.  Generally should be -1 (bidirectional)
       // for compatibility with 2.x branch
       int defaultKeyDirection = -1;
-
-      // If true, force ciphersuite to be one of:
-      // 1. TLS_DHE_RSA_WITH_AES_256_CBC_SHA, or
-      // 2. TLS_DHE_RSA_WITH_AES_128_CBC_SHA
-      // and disable setting TLS minimum version.
-      // This is intended for compatibility with legacy systems.
-      bool forceAesCbcCiphersuites = false;
 
       // Override the minimum TLS version:
       //   disabled -- don't specify a minimum, and disable any minimum
@@ -327,6 +321,21 @@ namespace openvpn {
 
       // Use wintun instead of tap-windows6 on Windows
       bool wintun = false;
+
+      // On Windows allow DNS resolvers on localhost, such as Umbrella Roaming Client
+      // This disables adding NRPT rule for "." zone and permits DNS requests to localhost
+      bool allowLocalDnsResolvers = false;
+
+      // Allow usage of legacy (cipher) algorithm that are no longer considered safe
+      // This includes BF-CBC, single DES and RC2 private key encryption.
+      // With OpenSSL 3.0 this also instructs OpenSSL to load the legacy provider.
+      bool enableLegacyAlgorithms = false;
+
+      // By default modern OpenVPN version (OpenVPN 2.6 and OpenVPN core 3.7) will only allow
+      // preferred algorithms (AES-GCM, Chacha20-Poly1305) that also work with the newer DCO
+      // implementations. If this is enabled, we fall back to allowing all algorithms (if these are
+      // supported by the crypto library)
+      bool enableNonPreferredDCAlgorithms = false;
     };
 
     // used to communicate VPN events such as connect, disconnect, etc.

@@ -39,6 +39,9 @@
 #define OPENVPN_DEBUG
 #define OPENVPN_ENABLE_ASSERT
 
+// EKM vs. TLS_PRF mode
+//#define USE_TLS_EKM
+
 #if !defined(USE_TLS_AUTH) && !defined(USE_TLS_CRYPT)
 //#define USE_TLS_AUTH
 //#define USE_TLS_CRYPT
@@ -889,11 +892,11 @@ int test(const int thread_num)
     MySessionStats::Ptr serv_stats(new MySessionStats);
 
     // client ProtoContext config
-    CryptoAlgs::allow_default_dc_algs();
     typedef ProtoContext ClientProtoContext;
     ClientProtoContext::Config::Ptr cp(new ClientProtoContext::Config);
     cp->ssl_factory = cc->new_factory();
-    cp->dc.set_factory(new CryptoDCSelect<ClientCryptoAPI>(frame, cli_stats, prng_cli));
+	CryptoAlgs::allow_default_dc_algs<ClientCryptoAPI>(cp->ssl_factory->libctx(), false, false);
+	cp->dc.set_factory(new CryptoDCSelect<ClientCryptoAPI>(cp->ssl_factory->libctx(), frame, cli_stats, prng_cli));
     cp->tlsprf_factory.reset(new CryptoTLSPRFFactory<ClientCryptoAPI>());
     cp->frame = frame;
     cp->now = &time;
@@ -908,6 +911,9 @@ int test(const int thread_num)
     cp->comp_ctx = CompressContext(COMP_METH, false);
     cp->dc.set_cipher(CryptoAlgs::lookup(PROTO_CIPHER));
     cp->dc.set_digest(CryptoAlgs::lookup(PROTO_DIGEST));
+#ifdef USE_TLS_EKM
+    cp->dc.set_key_derivation(CryptoAlgs::KeyDerivation::TLS_EKM);
+#endif
 #ifdef USE_TLS_AUTH
     cp->tls_auth_factory.reset(new CryptoOvpnHMACFactory<ClientCryptoAPI>());
     cp->tls_key.parse(tls_auth_key);
@@ -980,7 +986,7 @@ int test(const int thread_num)
     typedef ProtoContext ServerProtoContext;
     ServerProtoContext::Config::Ptr sp(new ServerProtoContext::Config);
     sp->ssl_factory = sc->new_factory();
-    sp->dc.set_factory(new CryptoDCSelect<ServerCryptoAPI>(frame, serv_stats, prng_serv));
+    sp->dc.set_factory(new CryptoDCSelect<ServerCryptoAPI>(sp->ssl_factory->libctx(), frame, serv_stats, prng_serv));
     sp->tlsprf_factory.reset(new CryptoTLSPRFFactory<ServerCryptoAPI>());
     sp->frame = frame;
     sp->now = &time;
@@ -995,6 +1001,9 @@ int test(const int thread_num)
     sp->comp_ctx = CompressContext(COMP_METH, false);
     sp->dc.set_cipher(CryptoAlgs::lookup(PROTO_CIPHER));
     sp->dc.set_digest(CryptoAlgs::lookup(PROTO_DIGEST));
+#ifdef USE_TLS_EKM
+    sp->dc.set_key_derivation(CryptoAlgs::KeyDerivation::TLS_EKM);
+#endif
 #ifdef USE_TLS_AUTH
     sp->tls_auth_factory.reset(new CryptoOvpnHMACFactory<ServerCryptoAPI>());
     sp->tls_key.parse(tls_auth_key);
